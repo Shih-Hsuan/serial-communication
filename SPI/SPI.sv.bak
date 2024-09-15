@@ -1,0 +1,140 @@
+`timescale 1ns/1ps
+module SPI(
+	input logic clk, // 100MHz
+	input logic sclk, // counter
+	input logic rst,
+	input logic ssn,
+	input logic mosi, // master以此腳傳送資料到slave
+	output logic[7:0] address,
+	output logic[15:0] data,
+	output logic read_en,
+	output logic write_en,
+	output logic tx_req
+);
+
+	typedef enum{INIT, START_SPI_RX, RECEIVE_ADDRESS, DUMMY, CHECK_COMMAND, RECEIVE_DATA, TX_REQ, FINISH, WRITE} state_t;
+	state_t ps, ns;
+	
+	logic ssn_negedge;
+	negedge_detector negedge_detector_u1(
+		.clk(clk),
+		.rst(rst),
+		.enc_filter(ssn),
+		.enc_neg(ssn_negedge)
+	);
+	
+	logic sclk_posedge;
+	posedge_detector posedge_detector_u1(
+		.clk(clk),
+		.rst(rst),
+		.enc_filter(sclk),
+		.enc_pos(sclk_posedge)
+	);
+	
+	// FSM
+	always_ff @(posedge clk) begin
+		if(rst)
+			ps <= INIT;
+		else
+			ps <= ns;
+	end
+
+	// counter
+	logic receive_data_counter_reset;
+	logic[31:0] receive_data_counter;
+	always_ff @(posedge clk) begin
+		if(rst | receive_data_counter_reset)
+			receive_data_counter <= 32'h00000000;
+		else if(sclk_posedge)
+			receive_data_counter <= receive_data_counter + 1;
+	end
+
+	// shift register
+	logic[15:0] shift_data;
+	always_ff @(posedge clk) begin 
+		if(rst)
+			shift_data <= 16'h0000;
+		else if(sclk_posedge)
+			shift_data <= {shift_data[14:0], mosi};
+	end
+	
+	// register
+	logic command;
+	logic load_address, load_data, load_command;
+	always_ff @(posedge clk) begin
+		if(rst) begin
+			address <= 8'h00;
+			data <= 16'h0000;
+			command <= 1'b0;
+		end
+		else if(load_address)
+			address <= shift_data[15:8];
+		else if(load_data)
+			data <= shift_data;
+		else if(load_command)
+			command <= shift_data[7];
+	end
+	
+	always_comb begin
+		receive_data_counter_reset = 0;
+		load_address = 0;
+		load_command = 0;
+		load_data = 0;
+		case(ps)
+			INIT: 
+				begin
+					ns = START_SPI_RX;
+				end
+			START_SPI_RX:
+				begin
+					if(ssn_negedge)
+						ns = RECEIVE_ADDRESS;
+				end
+			RECEIVE_ADDRESS:
+				begin
+					if(receive_data_counter >= 9) begin
+						load_address = 1;
+						ns = DUMMY;
+					end
+				end
+			DUMMY:
+				begin
+					if(receive_data_counter >= 16) begin
+						load_command = 1;
+						receive_data_counter_reset = 1;
+						ns = CHECK_COMMAND;
+					end
+				end
+			CHECK_COMMAND:
+				begin
+					if(command == 1) begin
+						ns = RECEIVE_DATA;
+					end
+					else if(command ==0) begin
+						ns = TX_REQ;
+					end
+				end
+			RECEIVE_DATA:
+				begin
+					if(receive_data_counter >= 16) begin
+						load_data = 1;
+						receive_data_counter_reset = 1;
+						ns = WRITE;
+					end
+				end
+			WRITE:
+				begin
+					ns = FINISH;
+				end
+			TX_REQ: 
+				begin
+					ns = FINISH;
+				end
+			FINISH:
+				begin
+					ns = INIT;
+				end
+		endcase
+	end
+	
+endmodule
